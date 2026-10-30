@@ -1,4 +1,4 @@
-import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
