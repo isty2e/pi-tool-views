@@ -1,7 +1,7 @@
 import type { RequestView, ResultView } from "../presentation.ts";
 import type { DiffViewUnit } from "./model.ts";
 
-/** Whether a complete receipt and a whole-call diff describe the same visible replacement pairs. */
+/** Whether a complete receipt and a whole-call diff contain the same replacements. */
 export function reportedCoversRequestedEdits(request: RequestView, result: ResultView | undefined, units: readonly DiffViewUnit[]): boolean {
   if (request.kind !== "change.replacements" || request.requestedEdits.length < 2 || result?.completeEditReceipt !== true
     || result.parts.filter(part => part.kind === "diff").length !== 1 || units.length !== 1) return false;
@@ -32,10 +32,12 @@ export function reportedCoversRequestedEdits(request: RequestView, result: Resul
       for (const block of hunk.blocks) {
         if (block.kind === "gap") return false;
         if (block.kind !== "change") continue;
-        for (const pair of block.pairs) {
-          if (!pair.before || !pair.after) return false;
-          if (pair.before.text === pair.after.text) continue;
-          const key = JSON.stringify([pair.before.text, pair.after.text]);
+        const before = block.pairs.flatMap(pair => pair.before ? [pair.before.text] : []);
+        const after = block.pairs.flatMap(pair => pair.after ? [pair.after.text] : []);
+        if (before.length !== after.length) return false;
+        for (let index = 0; index < before.length; index += 1) {
+          if (before[index] === after[index]) continue;
+          const key = JSON.stringify([before[index], after[index]]);
           const count = counts.get(key) ?? 0;
           if (count === 0) return false;
           counts.set(key, count - 1);

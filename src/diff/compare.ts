@@ -2,7 +2,7 @@ import { diffArrays } from "diff";
 import type { ChangedLinePair, DiffBlock, DiffCell, DiffHunk, DiffViewUnit } from "./model.ts";
 
 export interface ComparisonOptions {
-  /** Maximum total line and grapheme tokens refined across one build call (default 25,000; cap 500,000). */
+  /** Maximum comparison work across lines, row matching and graphemes (default 25,000; cap 500,000). */
   readonly maxComparisonTokens?: number;
   /** Maximum edit distance considered by each refinement (default 1,024; cap 4,096). */
   readonly maxEditLength?: number;
@@ -172,17 +172,102 @@ function graphemeEmphasis(before: DiffCell, after: DiffCell, budget: ComparisonB
   };
 }
 
-function makePair(before: DiffCell | undefined, after: DiffCell | undefined): ChangedLinePair | undefined {
-  if (before === undefined && after === undefined) return undefined;
-  return before === undefined ? { after: after! } : after === undefined ? { before } : { before, after };
+function lineSimilarity(before: string, after: string): number {
+  if (before === after) return 1;
+  const shorter = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < shorter && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < shorter - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  return (prefix + suffix) / Math.max(before.length, after.length);
+}
+
+function separateChangedLines(before: readonly DiffCell[], after: readonly DiffCell[]): ChangedLinePair[] {
+  return [
+    ...before.map((cell) => ({ before: { ...cell, emphasis: fullSpan(cell) } })),
+    ...after.map((cell) => ({ after: { ...cell, emphasis: fullSpan(cell) } })),
+  ];
+}
+
+function alignChangedLines(before: readonly DiffCell[], after: readonly DiffCell[], budget: ComparisonBudget): ChangedLinePair[] | undefined {
+  if ((before.length === 1 && after.length === 1)
+    || (before.length === after.length && before.every((cell, index) => cell.text === after[index]!.text))) {
+    return before.map((cell, index) => ({ before: cell, after: after[index]! }));
+  }
+
+  const width = after.length + 1;
+  const work = (before.length + 1) * width
+    + before.reduce((total, cell) => total + cell.text.length, 0)
+    + after.reduce((total, cell) => total + cell.text.length, 0);
+  if (work > budget.maxComparisonTokens - budget.consumedTokens || remainingTime(budget) <= 0) return undefined;
+  budget.consumedTokens += work;
+
+  const oldText = before.map(cell => cell.text.replace(/\s+/g, ""));
+  const newText = after.map(cell => cell.text.replace(/\s+/g, ""));
+  const scores = new Float64Array((before.length + 1) * width);
+  const steps = new Uint8Array(scores.length);
+  const minimumSimilarity = 0.2;
+
+  // Zero-cost gaps let unrelated rows stay separate while stronger matches retain their order.
+  for (let oldIndex = 1; oldIndex <= before.length; oldIndex += 1) {
+    for (let newIndex = 1; newIndex <= after.length; newIndex += 1) {
+      if (remainingTime(budget) <= 0) return undefined;
+      const index = oldIndex * width + newIndex;
+      const remove = scores[index - width]!;
+      const add = scores[index - 1]!;
+      let score = Math.max(remove, add);
+      let step = add >= remove ? 2 : 1;
+      const similarity = lineSimilarity(oldText[oldIndex - 1]!, newText[newIndex - 1]!);
+      const paired = scores[index - width - 1]! + similarity - minimumSimilarity;
+      if (similarity > minimumSimilarity && paired > score) {
+        score = paired;
+        step = 3;
+      }
+      scores[index] = score;
+      steps[index] = step;
+    }
+  }
+
+  const pairs: ChangedLinePair[] = [];
+  let oldIndex = before.length;
+  let newIndex = after.length;
+  while (oldIndex > 0 || newIndex > 0) {
+    const step = steps[oldIndex * width + newIndex];
+    if (oldIndex > 0 && newIndex > 0 && step === 3) {
+      pairs.push({ before: before[--oldIndex]!, after: after[--newIndex]! });
+    } else if (oldIndex > 0 && (newIndex === 0 || step === 1)) {
+      pairs.push({ before: before[--oldIndex]! });
+    } else {
+      pairs.push({ after: after[--newIndex]! });
+    }
+  }
+  return pairs.reverse();
+}
+
+function refineChangedLines(before: readonly DiffCell[], after: readonly DiffCell[], budget: ComparisonBudget): {
+  readonly pairs: readonly [ChangedLinePair, ...ChangedLinePair[]];
+  readonly coarse: boolean;
+} {
+  if (before.length === 0 || after.length === 0) {
+    return { pairs: separateChangedLines(before, after) as [ChangedLinePair, ...ChangedLinePair[]], coarse: false };
+  }
+  const aligned = alignChangedLines(before, after, budget);
+  if (aligned === undefined) return { pairs: separateChangedLines(before, after) as [ChangedLinePair, ...ChangedLinePair[]], coarse: true };
+
+  let coarse = false;
+  const pairs = aligned.map(pair => {
+    if (pair.before === undefined) return { after: { ...pair.after!, emphasis: fullSpan(pair.after!) } };
+    if (pair.after === undefined) return { before: { ...pair.before, emphasis: fullSpan(pair.before) } };
+    const emphasized = graphemeEmphasis(pair.before, pair.after, budget);
+    coarse ||= emphasized.coarse;
+    return { before: emphasized.before, after: emphasized.after };
+  });
+  return { pairs: pairs as [ChangedLinePair, ...ChangedLinePair[]], coarse };
 }
 
 function coarseHunk(before: readonly DiffCell[], after: readonly DiffCell[]): DiffHunk | undefined {
   if (before.length === 0 && after.length === 0) return undefined;
-  const pairs: ChangedLinePair[] = [
-    ...before.map((cell) => ({ before: { ...cell, emphasis: fullSpan(cell) } })),
-    ...after.map((cell) => ({ after: { ...cell, emphasis: fullSpan(cell) } })),
-  ];
+  const pairs = separateChangedLines(before, after);
   return { blocks: [{ kind: "change", pairs: pairs as [ChangedLinePair, ...ChangedLinePair[]] }] };
 }
 
@@ -207,12 +292,9 @@ export function compareText(beforeText: string, afterText: string, budget: Compa
   const flushChanged = (): void => {
     if (removed.length === 0 && added.length === 0) return;
 
-    const pairs: ChangedLinePair[] = [];
-    const pairCount = Math.max(removed.length, added.length);
-    for (let index = 0; index < pairCount; index += 1) {
-      pairs.push(makePair(removed[index], added[index])!);
-    }
-    blocks.push({ kind: "change", pairs: pairs as [ChangedLinePair, ...ChangedLinePair[]] });
+    const refined = refineChangedLines(removed, added, budget);
+    blocks.push({ kind: "change", pairs: refined.pairs });
+    coarse ||= refined.coarse;
     removed = [];
     added = [];
   };
@@ -230,28 +312,9 @@ export function compareText(beforeText: string, afterText: string, budget: Compa
 
   flushChanged();
 
-  const refinedBlocks = blocks.map((block) => {
-    if (block.kind !== "change") return block;
-    const pairs: ChangedLinePair[] = [];
-    for (const pair of block.pairs) {
-      if (pair.before === undefined || pair.after === undefined) {
-        const cell = pair.before ?? pair.after!;
-        pairs.push(pair.before === undefined
-          ? { after: { ...cell, emphasis: fullSpan(cell) } }
-          : { before: { ...cell, emphasis: fullSpan(cell) } });
-        continue;
-      }
-
-      const emphasized = graphemeEmphasis(pair.before, pair.after, budget);
-      pairs.push({ before: emphasized.before, after: emphasized.after });
-      coarse ||= emphasized.coarse;
-    }
-    return { ...block, pairs: pairs as [ChangedLinePair, ...ChangedLinePair[]] };
-  });
-
-  return refinedBlocks.length === 0
+  return blocks.length === 0
     ? { coarse }
-    : { hunk: { blocks: refinedBlocks as [DiffBlock, ...DiffBlock[]] }, coarse };
+    : { hunk: { blocks: blocks as [DiffBlock, ...DiffBlock[]] }, coarse };
 }
 
 export function decorateUnit(unit: DiffViewUnit, budget: ComparisonBudget): DiffViewUnit {
@@ -263,14 +326,15 @@ export function decorateUnit(unit: DiffViewUnit, budget: ComparisonBudget): Diff
       ...hunk,
       blocks: hunk.blocks.map((block) => {
         if (block.kind !== "change") return block;
-        const pairs = block.pairs.map((pair) => {
-          if (pair.before === undefined) return { after: { ...pair.after!, emphasis: fullSpan(pair.after!) } };
-          if (pair.after === undefined) return { before: { ...pair.before, emphasis: fullSpan(pair.before) } };
-          const emphasized = graphemeEmphasis(pair.before, pair.after, budget);
-          coarse ||= emphasized.coarse;
-          return { before: emphasized.before, after: emphasized.after };
-        });
-        return { ...block, pairs: pairs as [ChangedLinePair, ...ChangedLinePair[]] };
+        const before: DiffCell[] = [];
+        const after: DiffCell[] = [];
+        for (const pair of block.pairs) {
+          if (pair.before) before.push(pair.before);
+          if (pair.after) after.push(pair.after);
+        }
+        const refined = refineChangedLines(before, after, budget);
+        coarse ||= refined.coarse;
+        return { ...block, pairs: refined.pairs };
       }) as [DiffBlock, ...DiffBlock[]],
     }));
     return { ...section, hunks };
