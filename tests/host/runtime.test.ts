@@ -16,7 +16,7 @@ function assistant(call: ToolCall): AssistantMessage {
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 
-test("a separately delivered result invalidates the call once, not on every copied IPC payload", () => {
+test("result refreshes preserve one body and do not repeat on copied IPC payloads", async () => {
   let resolver: ToolRendererResolver | undefined;
   const api = { on: () => () => {}, registerCommand() {}, registerToolRenderer(value: ToolRendererResolver) { resolver = value; } } as unknown as ExtensionAPI;
   const runtime = new ToolViewsRuntime(api, {
@@ -26,19 +26,40 @@ test("a separately delivered result invalidates the call once, not on every copi
   });
   runtime.install();
   let invalidations = 0;
+  const components: Component[] = [];
+  let supplied: { content: { type: "text"; text: string }[]; details: undefined } | undefined;
   const context: RenderContext = { args: {}, state: {}, toolCallId: "copied", cwd: "/fixture", argsComplete: false,
     executionStarted: false, isPartial: false, isError: false, durationMs: 0, expanded: false, showImages: true,
-    outputPad: 1, lastComponent: undefined, invalidate: () => { invalidations++; } };
+    outputPad: 1, lastComponent: undefined, invalidate: () => { invalidations++; refresh(); } };
   const renderer = resolver!("opaque", () => undefined)!;
+  function refresh() {
+    components.length = 0;
+    components.push(renderer.renderCall!(context.args, theme, context));
+    if (supplied) components.push(renderer.renderResult!(supplied, { expanded: false, isPartial: false }, theme, context));
+  }
+  const paint = () => components.flatMap(component => component.render(80));
   try {
-    const call = renderer.renderCall!({}, theme, context);
-    assert.ok(call.render(80).some(line => line.includes("Preparing")));
-    renderer.renderResult!({ content: [{ type: "text", text: "result" }], details: undefined }, { expanded: false, isPartial: false }, theme, context);
+    refresh();
+    assert.ok(paint().some(line => line.includes("Preparing")));
+    supplied = { content: [{ type: "text", text: "RESULT_MARKER" }], details: undefined };
+    refresh();
+    const first = paint();
+    assert.equal(first.filter(line => line.includes("RESULT_MARKER")).length, 1);
+    await Promise.resolve();
     assert.equal(invalidations, 1);
-    assert.ok(call.render(80).some(line => line.includes("Called opaque")));
+    assert.equal(paint().length, first.length);
+    assert.ok(paint().some(line => line.includes("Called opaque")));
     for (let index = 0; index < 3; index++) {
-      renderer.renderResult!({ content: [{ type: "text", text: "result" }], details: undefined }, { expanded: false, isPartial: false }, theme, context);
+      supplied = { content: [{ type: "text", text: "RESULT_MARKER" }], details: undefined };
+      refresh();
+      assert.equal(paint().filter(line => line.includes("RESULT_MARKER")).length, 1);
+      assert.equal(paint().length, first.length);
     }
+    await Promise.resolve();
+    assert.equal(invalidations, 1);
+    renderer.renderResult!(supplied, { expanded: false, isPartial: false }, theme, { ...context, durationMs: 10 });
+    runtime.dispose();
+    await Promise.resolve();
     assert.equal(invalidations, 1);
   } finally { runtime.dispose(); }
 });

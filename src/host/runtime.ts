@@ -66,7 +66,7 @@ export class ToolViewsRuntime {
           record.resultPartial = context.isPartial;
           record.resultStale = record.row.childPaused;
           this.associate(record.row);
-          if (recheckCall && !record.row.childPaused) record.row.invalidate();
+          if (recheckCall && !record.row.childPaused) queueMicrotask(() => record.row.invalidate());
           return record.row.resultComponent;
         },
       };
