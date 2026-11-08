@@ -21,9 +21,10 @@ interface Capture {
   readonly after: PhaseReads;
   readonly claims: Set<string>;
   readonly preflight: PreparedFiles;
+  readonly startOrder: number;
   executed?: PreparedFiles;
   overlapping: boolean;
-  finished: boolean;
+  endOrder?: number;
 }
 export interface CapturedFiles {
   readonly before: ReadonlyMap<string, CapturedText>;
@@ -42,6 +43,8 @@ export class FileObservations {
   private active = 0;
   private reserved = 0;
   private retained = 0;
+  private order = 0;
+  private captureSuspended = false;
 
   constructor(limits: ObservationLimits = observationLimits) { this.limits = limits; }
 
@@ -50,9 +53,10 @@ export class FileObservations {
   directory(key: string): string | undefined { return this.captures.get(key)?.preflight.directory; }
 
   async preflight(key: string, files: PreparedFiles): Promise<void> {
-    if (this.captures.has(key) || this.captures.size >= this.limits.calls) return;
+    if (this.captures.has(key) || this.captureSuspended) return;
+    if (this.captures.size >= this.limits.calls) { this.suspendCaptures(); return; }
     const capture: Capture = { key, preflight: files, controller: new AbortController(), before: phaseReads(), after: phaseReads(),
-      claims: new Set(), overlapping: false, finished: false };
+      claims: new Set(), overlapping: false, startOrder: ++this.order };
     this.captures.set(key, capture);
     for (const target of files.targets) for (const reference of [target.before, target.after]) {
       if (reference.kind === "local") this.claim(capture, reference.absolutePath);
@@ -73,16 +77,17 @@ export class FileObservations {
 
   finish(key: string): void {
     const capture = this.captures.get(key);
-    if (!capture) return;
-    capture.finished = true;
-    this.unclaim(capture);
+    if (!capture || capture.endOrder !== undefined) return;
+    capture.endOrder = ++this.order;
     if (!capture.executed) this.discard(key);
   }
+
+  completeTurn(): void { this.captureSuspended = false; }
 
   take(key: string, expected: PreparedFiles): CapturedFiles | undefined {
     const capture = this.captures.get(key);
     if (!capture) return undefined;
-    if (!capture.finished || capture.overlapping || capture.controller.signal.aborted || capture.executed?.signature !== expected.signature) {
+    if (capture.endOrder === undefined || capture.overlapping || capture.controller.signal.aborted || capture.executed?.signature !== expected.signature) {
       this.discard(key);
       return undefined;
     }
@@ -94,6 +99,7 @@ export class FileObservations {
   discard(key: string): void {
     const capture = this.captures.get(key);
     if (!capture) return;
+    if (capture.endOrder === undefined) this.suspendCaptures();
     this.captures.delete(key);
     capture.controller.abort();
     this.unclaim(capture);
@@ -102,15 +108,28 @@ export class FileObservations {
     this.pump();
   }
 
-  reset(): void { for (const key of this.captures.keys()) this.discard(key); }
+  reset(): void {
+    for (const key of this.captures.keys()) this.discard(key);
+    this.captureSuspended = false;
+    this.order = 0;
+  }
+
+  private suspendCaptures(): void {
+    this.captureSuspended = true;
+    for (const capture of this.captures.values()) capture.overlapping = true;
+  }
 
   private current(capture: Capture): boolean { return this.captures.get(capture.key) === capture && !capture.controller.signal.aborted; }
 
   private claim(capture: Capture, address: string): void {
-    if (capture.finished || !this.current(capture) || capture.claims.has(address)) return;
+    if (capture.endOrder !== undefined || !this.current(capture) || capture.claims.has(address)) return;
     let owners = this.writers.get(address);
     if (!owners) { owners = new Set(); this.writers.set(address, owners); }
-    for (const owner of owners) { owner.overlapping = true; capture.overlapping = true; }
+    for (const owner of owners) {
+      if (owner.endOrder !== undefined && owner.endOrder < capture.startOrder) continue;
+      owner.overlapping = true;
+      capture.overlapping = true;
+    }
     owners.add(capture);
     capture.claims.add(address);
   }
@@ -134,6 +153,7 @@ export class FileObservations {
   private async capture(capture: Capture, phaseName: Phase, files: PreparedFiles): Promise<void> {
     const phase = capture[phaseName];
     if (phase.pending) return phase.pending;
+    if (this.captureSuspended) return;
     const addresses = new Set(files.targets.flatMap(target => {
       const reference = target[phaseName];
       return reference.kind === "local" ? [reference.absolutePath] : [];
@@ -164,29 +184,32 @@ export class FileObservations {
   }
 
   private enqueue(capture: Capture, run: () => Promise<void>): Promise<void> {
-    if (this.queue.length >= this.limits.queuedReads || !this.current(capture)) return Promise.resolve();
+    if (!this.current(capture) || this.captureSuspended) return Promise.resolve();
+    if (this.queue.length >= this.limits.queuedReads) { this.suspendCaptures(); return Promise.resolve(); }
     return new Promise(done => { this.queue.push({ capture, run, done }); this.pump(); });
   }
 
   private pump(): void {
     while (this.active < this.limits.concurrentReads && this.queue.length) {
       const job = this.queue.shift()!;
-      if (!this.current(job.capture)) { job.done(); continue; }
+      if (!this.current(job.capture) || this.captureSuspended) { job.done(); continue; }
       this.active++;
       void job.run().catch(() => {}).finally(() => { this.active--; job.done(); this.pump(); });
     }
   }
 
   private async read(capture: Capture, phase: PhaseReads, address: string): Promise<CapturedText | undefined> {
-    if (this.reserved + this.retained + this.limits.fileBytes > this.limits.totalBytes) return undefined;
+    if (this.captureSuspended) return undefined;
+    if (this.reserved + this.retained + this.limits.fileBytes > this.limits.totalBytes) { this.suspendCaptures(); return undefined; }
     this.reserved += this.limits.fileBytes;
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
       file = await open(address, constants.O_RDONLY | constants.O_NONBLOCK);
       const stat = await file.stat();
-      if (!this.current(capture) || !stat.isFile() || stat.size > this.limits.fileBytes) return undefined;
+      if (!this.current(capture) || !stat.isFile()) return undefined;
       const inode = `inode:${stat.dev}:${stat.ino}`;
       this.claim(capture, inode);
+      if (this.captureSuspended || stat.size > this.limits.fileBytes) return undefined;
       const shared = phase.canonical.get(inode);
       if (shared) return await shared;
       phase.canonical.set(inode, phase.canonical.get(address)!);

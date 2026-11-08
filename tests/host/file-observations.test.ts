@@ -93,6 +93,41 @@ test("known overlapping writers, including aliases, retain ordinary views", asyn
   captured.release();
 }));
 
+test("a retargeted writer invalidates an overlapping capture that already finished", async () => fixture(async (directory, store) => {
+  await writeFile(join(directory, "a.ts"), "old\n");
+  await writeFile(join(directory, "b.ts"), "unrelated\n");
+  const first = files(directory), planned = files(directory, ["b.ts"], "planned"), executed = files(directory, ["a.ts"], "retargeted");
+  await store.preflight("first", first);
+  await store.preflight("retargeted", planned);
+  await writeFile(join(directory, "a.ts"), "new\n");
+  await writeFile(join(directory, "a.ts"), "another writer's context\nnew\n");
+  await store.executed("first", first);
+  store.finish("first");
+  await store.executed("retargeted", executed);
+  store.finish("retargeted");
+  assert.equal(store.take("first", first), undefined);
+  assert.equal(store.take("retargeted", executed), undefined);
+}));
+
+test("sequential same-file calls retain their independent observations", async () => fixture(async (directory, store) => {
+  const path = join(directory, "a.ts"), prepared = files(directory);
+  await writeFile(path, "old\n");
+  await store.preflight("first", prepared);
+  await writeFile(path, "new\n");
+  await store.executed("first", prepared);
+  store.finish("first");
+  await store.preflight("second", prepared);
+  await writeFile(path, "newer\n");
+  await store.executed("second", prepared);
+  store.finish("second");
+  const first = store.take("first", prepared)!, second = store.take("second", prepared)!;
+  assert.equal(first.before.get(path)?.text, "old\n");
+  assert.equal(first.after.get(path)?.text, "new\n");
+  assert.equal(second.before.get(path)?.text, "new\n");
+  assert.equal(second.after.get(path)?.text, "newer\n");
+  first.release(); second.release();
+}));
+
 test("missing, nonregular, binary and invalid UTF-8 observations do not fail capture", async () => fixture(async (directory, store) => {
   await mkdir(join(directory, "folder"));
   await writeFile(join(directory, "binary"), Buffer.from([0, 1, 2]));
@@ -107,18 +142,17 @@ test("missing, nonregular, binary and invalid UTF-8 observations do not fail cap
   captured.release();
 }));
 
-test("byte/call limits decline optional observations and released reservations are reusable", async () => fixture(async directory => {
+test("oversized files release reservations for later captures", async () => fixture(async directory => {
   const store = new FileObservations({ ...observationLimits, fileBytes: 16, totalBytes: 64, calls: 1, phaseMs: 5000 });
   try {
     await writeFile(join(directory, "a.ts"), "x".repeat(17));
     const prepared = files(directory);
     await store.preflight("large", prepared);
-    await store.preflight("excess-call", prepared);
-    assert.equal(store.directory("excess-call"), undefined);
     await store.executed("large", prepared);
     store.finish("large");
     const large = store.take("large", prepared)!;
     assert.equal(large.before.size, 0);
+    assert.equal(large.after.size, 0);
     large.release();
     await writeFile(join(directory, "a.ts"), "short");
     await store.preflight("small", prepared);
@@ -128,6 +162,62 @@ test("byte/call limits decline optional observations and released reservations a
     assert.equal(small.before.get(join(directory, "a.ts"))?.text, "short");
     small.release();
   } finally { store.reset(); }
+}));
+
+test("a capacity-declined writer still invalidates an overlapping capture", async () => fixture(async directory => {
+  const store = new FileObservations({ ...observationLimits, calls: 1, phaseMs: 5000 });
+  try {
+    await writeFile(join(directory, "a.ts"), "old\n");
+    const prepared = files(directory);
+    await store.preflight("observed", prepared);
+    await store.preflight("declined-writer", prepared);
+    assert.equal(store.directory("declined-writer"), undefined);
+    await writeFile(join(directory, "a.ts"), "another call's contents\n");
+    await store.executed("observed", prepared);
+    store.finish("observed");
+    assert.equal(store.take("observed", prepared), undefined);
+
+    await store.preflight("capacity-freed-but-writer-active", prepared);
+    assert.equal(store.directory("capacity-freed-but-writer-active"), undefined);
+    store.completeTurn();
+    await store.preflight("next-turn", prepared);
+    await store.executed("next-turn", prepared);
+    store.finish("next-turn");
+    const recovered = store.take("next-turn", prepared)!;
+    assert.equal(recovered.before.get(join(directory, "a.ts"))?.text, "another call's contents\n");
+    recovered.release();
+  } finally { store.reset(); }
+}));
+
+for (const limit of [{ queuedReads: 0 }, { totalBytes: 0 }]) test(`${Object.keys(limit)[0]} pressure retains ordinary views until settlement`, async () => fixture(async directory => {
+  const store = new FileObservations({ ...observationLimits, ...limit, phaseMs: 5000 });
+  try {
+    await writeFile(join(directory, "a.ts"), "old\n");
+    const prepared = files(directory);
+    await store.preflight("unobserved-writer", prepared);
+    await store.executed("unobserved-writer", prepared);
+    store.finish("unobserved-writer");
+    assert.equal(store.take("unobserved-writer", prepared), undefined);
+    await store.preflight("still-unsafe", prepared);
+    assert.equal(store.directory("still-unsafe"), undefined);
+  } finally { store.reset(); }
+}));
+
+test("discarding an unfinished capture does not forget its possible writes", async () => fixture(async (directory, store) => {
+  await writeFile(join(directory, "a.ts"), "old\n");
+  const prepared = files(directory);
+  const pending = store.preflight("unfinished", prepared);
+  store.discard("unfinished");
+  await pending;
+  await store.preflight("during-untracked-writer", prepared);
+  assert.equal(store.directory("during-untracked-writer"), undefined);
+  store.completeTurn();
+  await store.preflight("settled", prepared);
+  await store.executed("settled", prepared);
+  store.finish("settled");
+  const recovered = store.take("settled", prepared)!;
+  assert.equal(recovered.before.get(join(directory, "a.ts"))?.text, "old\n");
+  recovered.release();
 }));
 
 test("session reset invalidates pending capture even when a source key is reused", async () => fixture(async (directory, store) => {

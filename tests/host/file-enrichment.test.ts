@@ -9,6 +9,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { ToolViewsRuntime } from "../../src/host/runtime.ts";
 import { FileObservations, observationLimits } from "../../src/host/file-observations.ts";
+import type { PreparedFiles } from "../../src/host/file-targets.ts";
 import { compileProjection } from "../../src/projection/index.ts";
 import { buildDiffPresentation } from "../../src/diff/compose.ts";
 import { renderToolDiff } from "../../src/display/diff.ts";
@@ -28,7 +29,7 @@ for (const kind of ["direct", "nested", "error", "incomplete-parent"] as const) 
   let resolver: ToolRendererResolver | undefined;
   const api = { on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) { handlers.set(name, handler); return () => {}; },
     registerCommand() {}, registerToolRenderer(value: ToolRendererResolver) { resolver = value; } } as unknown as ExtensionAPI;
-  const observations = new FileObservations({ ...observationLimits, phaseMs: 5000 });
+  const observations = new FileObservations({ ...observationLimits, calls: 1, phaseMs: 5000 });
   let release: () => void = () => {};
   const released = new Promise<void>(done => { release = done; });
   const discard = observations.discard.bind(observations);
@@ -38,11 +39,11 @@ for (const kind of ["direct", "nested", "error", "incomplete-parent"] as const) 
   const emit = async (name: string, event: unknown) => handlers.get(name)?.(event, ctx);
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
-    runtime.install();
-    await emit("session_start", {});
     const checkpoint = manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [{ name: "arbitrary_patch_provider", description: "Patch files.",
       parameters: { type: "object", required: ["input"], properties: { input: { type: "string", description: "Patch text" } } } },
       { name: "parent_fixture", description: "Execute JavaScript code.", parameters: { type: "object", required: ["code"], properties: { code: { type: "string", description: "JavaScript source" } } } }] });
+    runtime.install();
+    await emit("session_start", {});
     const args = { input: "*** Begin Patch\n*** Update File: file.ts\n@@\n-old\n+new\n*** End Patch" };
     const call = { type: "toolCall" as const, id: "patch", name: "arbitrary_patch_provider", arguments: args };
     const parent = { type: "toolCall" as const, id: "parent", name: "parent_fixture", arguments: { code: "await tools.patch();" } };
@@ -50,6 +51,17 @@ for (const kind of ["direct", "nested", "error", "incomplete-parent"] as const) 
     const message: AssistantMessage = { role: "assistant", content: [nested ? parent : call], api: "anthropic-messages", provider: "fixture", model: "fixture", stopReason: "toolUse", timestamp: 2,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     await writeFile(join(root, "file.ts"), "OBSERVED_LEAD\nold\nOBSERVED_TAIL\n");
+    if (kind === "direct" || kind === "nested") {
+      const reference = { kind: "local" as const, absolutePath: join(root, "file.ts") };
+      const prepared: PreparedFiles = { directory: root, signature: "pressure", request: { kind: "uninterpreted" },
+        targets: [{ operationIndex: 0, path: "file.ts", before: reference, after: reference }] };
+      await observations.preflight("capacity", prepared);
+      await observations.preflight("declined-writer", prepared);
+      observations.finish("capacity");
+      await observations.preflight("still-suspended", prepared);
+      assert.equal(observations.directory("still-suspended"), undefined);
+      await emit(kind === "direct" ? "turn_end" : "agent_end", {});
+    }
     await emit("message_start", { message });
     manager.appendMessage(message);
     await emit("message_end", { message });

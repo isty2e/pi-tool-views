@@ -259,6 +259,7 @@ export class ToolViewsRuntime {
       });
     }));
     this.stops.push(this.pi.on("turn_end", (_event, ctx) => {
+      this.observations.completeTurn();
       this.refresh(ctx, this.nestedRevalidate);
       this.source.finish();
       this.source.finishChildren();
@@ -268,6 +269,7 @@ export class ToolViewsRuntime {
       this.scheduleObservations();
     }));
     this.stops.push(this.pi.on("agent_end", (_event, ctx) => {
+      this.observations.completeTurn();
       this.refresh(ctx, this.nestedRevalidate);
       this.source.finish();
       this.source.finishChildren();
