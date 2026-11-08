@@ -52,19 +52,25 @@ async function matchFile(text: string, candidates: readonly Candidate[], radius:
     if (candidate.literal.start === undefined) anchors.set(candidate.literal.cells[candidate.anchor]!.text, []);
   }
   let start = 0;
-  for (let offset = 0; offset < text.length; offset++) {
-    if (offset % 131072 === 0) {
+  let nextCheck = 0;
+  let lf = text.indexOf("\n");
+  let cr = text.indexOf("\r");
+  // Advance only consumed cursors; rescanning a missing separator would be quadratic.
+  // Literal searches also avoid retaining observations in RegExp's legacy static state.
+  while (lf >= 0 || cr >= 0) {
+    const offset = cr < 0 ? lf : lf < 0 ? cr : Math.min(lf, cr);
+    if (offset >= nextCheck) {
       await yieldIfNeeded();
       if (!current()) return new Map();
+      nextCheck = offset + 131072;
     }
-    const character = text[offset];
-    if (character !== "\r" && character !== "\n") continue;
-    const ending = character === "\r" && text[offset + 1] === "\n" ? "\r\n" : character;
+    const ending = offset === cr ? lf === cr + 1 ? "\r\n" : "\r" : "\n";
     anchors.get(text.slice(start, offset))?.push(lines.length);
     lines.push({ start, end: offset, ending });
     if (lines.length > 250_000) return new Map();
-    if (ending === "\r\n") offset++;
-    start = offset + 1;
+    start = offset + ending.length;
+    if (lf >= 0 && lf < start) lf = text.indexOf("\n", start);
+    if (cr >= 0 && cr < start) cr = text.indexOf("\r", start);
   }
   if (start < text.length) {
     anchors.get(text.slice(start))?.push(lines.length);

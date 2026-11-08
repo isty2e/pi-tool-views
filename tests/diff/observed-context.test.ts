@@ -138,6 +138,41 @@ test("insertions and deletions only locate the endpoint with literal text", asyn
   }
 });
 
+test("mixed line endings and long logical lines preserve locations and exact context", async () => {
+  const plan = replacement();
+  const long = "x".repeat(160_000);
+  const observed = await observeDiffContext(plan, new Map([["file.ts", {
+    before: `\r\n${long}\rold\nend\r\n`, after: `\n${long}\r\nnew\rend\n`,
+  }]]), 10);
+  const blocks = observed.get(firstHunk(plan))!.blocks;
+  const context = blocks.filter(block => block.kind === "observed-context");
+  assert.deepEqual(context.map(block => block.before?.lineEnding), ["\r\n", "\r", "\r\n"]);
+  assert.deepEqual(context.map(block => block.after?.lineEnding), ["\n", "\r\n", "\n"]);
+  assert.equal(context[1]?.before?.text, long);
+  assert.equal(context[1]?.after?.text, long);
+  const change = blocks.find(block => block.kind === "change")!;
+  assert.equal(change.pairs[0].before?.line1, 3);
+  assert.equal(change.pairs[0].after?.line1, 3);
+});
+
+test("withdrawal at an async boundary discards partly prepared observations", async () => {
+  const plan = replacement();
+  let current = true;
+  const pending = observeDiffContext(plan, new Map([["file.ts", { before: "lead\nold\ntail\n", after: "lead\nnew\ntail\n" }]]), 3, () => current);
+  queueMicrotask(() => { current = false; });
+  assert.equal((await pending).size, 0);
+});
+
+test("matching does not retain a complete file observation in RegExp legacy state", async () => {
+  const plan = replacement();
+  const observation = { before: "private-lead\nold\nprivate-tail\n", after: "private-lead\nnew\nprivate-tail\n" };
+  const observed = await observeDiffContext(plan, new Map([["file.ts", observation]]), 3);
+  assert.ok(observed.size > 0);
+  const retained = Reflect.get(RegExp, "input");
+  assert.notEqual(retained, observation.before);
+  assert.notEqual(retained, observation.after);
+});
+
 test("unsupported material, unresolved scopes and cancelled work keep the ordinary view", async () => {
   const raw = buildDiffPresentation({ kind: "change.patch", text: "not a patch", format: "unconfirmed" }, undefined);
   assert.equal((await observeDiffContext(raw, new Map([["file.ts", { before: "old" }]]), 3)).size, 0);
