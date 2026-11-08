@@ -9,6 +9,31 @@ import { prepareFiles } from "../../src/host/file-targets.ts";
 import { observedMaterial } from "../../src/host/observed-material.ts";
 import type { DiffSection } from "../../src/diff/model.ts";
 
+test("unresolved target slots do not shift observations onto another request occurrence", async () => {
+  for (const missing of [0, 1, 2, 3]) {
+    const edits = ["a.ts", "b.ts", "c.ts"].map(path => ({ path, oldText: "old", newText: "new" }));
+    edits.splice(missing, 0, { path: "", oldText: "unknown-old", newText: "unknown-new" });
+    const request = { kind: "change.replacements" as const, requestedEdits: edits };
+    const prepared = new CallPreparations({ compile: () => ({ request: () => request, result: () => ({ parts: [{ kind: "original-content" }] }) }), compare: buildDiffPresentation }).prepare(undefined, {});
+    const files = prepareFiles(prepared, resolve("/fixture"));
+    const plan = buildDiffPresentation(request, undefined, { prepared: prepared.changes! });
+    const before = new Map(["a.ts", "b.ts", "c.ts"].map((path, index) => {
+      const text = [...Array<string>(index * 2).fill("padding"), `${path}-context`, "old", ""].join("\n");
+      return [resolve("/fixture", path), { text, bytes: text.length }] as const;
+    }));
+    const after = new Map([...before].map(([path, value]) => [path, { text: value.text.replace("\nold\n", "\nnew\n"), bytes: value.bytes }]));
+    const matching = observedMaterial({ request, result: { content: [], isError: false }, plan, inline: [] }, files, { before, after, release() {} });
+    const observed = await observeDiffContext(matching.plan, matching.observations, 1);
+    for (const [index, path] of ["a.ts", "b.ts", "c.ts"].entries()) {
+      const unit = plan.compoundRequest!.units.find(unit => unit.scope.kind === "file" && unit.scope.path === path)!;
+      const rows = renderDiffPresentation({ ...plan, units: [unit] }, 100, { layout: "unified", observed }).join("\n");
+      assert.ok(rows.includes(`${path}-context`), `${path} must display its own observed context`);
+      assert.match(rows, new RegExp(`${index * 2 + 2}\\s+- old`));
+      assert.match(rows, new RegExp(`${index * 2 + 2}\\s+\\+ new`));
+    }
+  }
+});
+
 test("identical path labels in different directories retain occurrence-local observations", async () => {
   const request = { kind: "change.replacements" as const, requestedEdits: [
     { path: "a.ts", oldText: "old-one", newText: "new-one", fileContext: { kind: "directory" as const, path: "one" } },

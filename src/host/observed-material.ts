@@ -12,7 +12,7 @@ export function observedMaterial(material: ObservationMaterial, files: PreparedF
   const observations = new Map<DiffHunk, FileObservations>();
   const shared = new Map<string, FileObservations>();
   const context = "fileContext" in files.request ? files.request.fileContext : undefined;
-  const observation = (target: PreparedFileTarget): FileObservations => {
+  const observation = (target: Pick<PreparedFileTarget, "before" | "after">): FileObservations => {
     const key = JSON.stringify([target.before, target.after]);
     let value = shared.get(key);
     if (!value) {
@@ -29,7 +29,7 @@ export function observedMaterial(material: ObservationMaterial, files: PreparedF
       if (section.kind !== "hunks") continue;
       const path = section.target?.path ?? unit.scope.path;
       const moveTo = section.target?.moveTo ?? unit.scope.moveTo;
-      const candidates = files.targets.filter(target => target.path === path || target.moveTo === path);
+      const candidates = explicit ? [explicit] : files.targets.filter(target => target.path === path || target.moveTo === path);
       const addresses = new Set(candidates.map(target => JSON.stringify([target.before, target.after])));
       if (!explicit && addresses.size > 1) continue;
       const target = explicit ?? candidates[0] ?? { path, before: fileReference(path, files.directory, context),
@@ -37,7 +37,8 @@ export function observedMaterial(material: ObservationMaterial, files: PreparedF
       for (const hunk of section.hunks) if (!observations.has(hunk)) observations.set(hunk, observation(target));
     }
   };
-  material.plan.compoundRequest?.units.forEach((unit, index) => append(unit, files.targets[index]));
+  const targetsByOperation = new Map(files.targets.map(target => [target.operationIndex, target]));
+  material.plan.compoundRequest?.units.forEach((unit, index) => append(unit, targetsByOperation.get(index)));
   for (const unit of [...material.plan.units, ...material.inline.flatMap(plan => plan.units)]) append(unit);
   return { plan: { ...material.plan, units: [...material.plan.units, ...material.inline.flatMap(plan => plan.units)] }, observations };
 }

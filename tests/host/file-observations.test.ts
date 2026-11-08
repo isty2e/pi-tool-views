@@ -7,7 +7,7 @@ import { FileObservations, observationLimits } from "../../src/host/file-observa
 import type { PreparedFiles } from "../../src/host/file-targets.ts";
 
 function files(directory: string, paths = ["a.ts"], signature = "request"): PreparedFiles {
-  return { directory, signature, request: { kind: "uninterpreted" }, targets: paths.map(path => ({ path,
+  return { directory, signature, request: { kind: "uninterpreted" }, targets: paths.map((path, operationIndex) => ({ operationIndex, path,
     before: { kind: "local", absolutePath: join(directory, path) }, after: { kind: "local", absolutePath: join(directory, path) } })) };
 }
 
@@ -57,7 +57,7 @@ test("blocked, rewritten and replaced invocations cannot reuse the old preflight
 test("moves read the original file before execution and the explicit destination afterwards", async () => fixture(async (directory, store) => {
   const before = join(directory, "a.ts"), after = join(directory, "moved.ts");
   await writeFile(before, "original\n");
-  const prepared: PreparedFiles = { ...files(directory), targets: [{ path: "a.ts", moveTo: "moved.ts",
+  const prepared: PreparedFiles = { ...files(directory), targets: [{ operationIndex: 0, path: "a.ts", moveTo: "moved.ts",
     before: { kind: "local", absolutePath: before }, after: { kind: "local", absolutePath: after } }] };
   await store.preflight("move", prepared);
   await rename(before, after);
