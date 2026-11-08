@@ -58,6 +58,17 @@ Pi `write` / `edit`, `apply_patch` tools, Hashline edits and Mitsupi replacement
 The same edit is shown in Unified and Split layouts with inline change emphasis.
 Patch batches can keep multiple file-operation sections together in one card.
 
+Live change views can fill in missing line numbers and surrounding context by
+matching supplied changes against local files observed before and after execution.
+Ordinary paths use the invocation's working directory unless the tool declares
+another directory or execution environment; explicit external or unresolved targets
+are not read locally. Undisclosed remote execution is not detected.
+Preflight preview reads are independent of the editing tool's
+approval and can occur before a later handler blocks it. Observations stay in memory,
+are not added to model context or session history, and are discarded for blocked
+calls. Ambiguous matches, overlapping calls and capture limits retain the ordinary
+diff; reopening old sessions does not read today's files to reconstruct past context.
+
 | Layout | Light | Dark |
 | --- | --- | --- |
 | Unified | ![Unified diff in the light theme](docs/images/changes-unified-light.png) | ![Unified diff in the dark theme](docs/images/changes-unified-dark.png) |

@@ -117,6 +117,12 @@ test("committed replacements and branch rebuilds refresh live components rather 
     emit("message_end", { message: assistant(raw) });
     emit("tool_execution_start", { toolCallId: "same", toolName: "echo" });
     assert.ok(host.call().render(80).join("\n").includes("SAFE"));
+    safe.arguments.value = "PREPARED";
+    emit("tool_call", { toolCallId: "same", toolName: "echo", input: safe.arguments });
+    assert.ok(host.call().render(80).join("\n").includes("PREPARED"));
+    safe.arguments.value = "EXECUTED";
+    emit("tool_result", { toolCallId: "same", toolName: "echo", input: safe.arguments });
+    assert.ok(host.call().render(80).join("\n").includes("EXECUTED"));
     host.finish();
     manager.appendMessage({ role: "toolResult", toolCallId: "same", toolName: "echo", content: [{ type: "text", text: "FINAL" }], isError: false, timestamp: 2 });
     emit("agent_end", {});

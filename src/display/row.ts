@@ -4,6 +4,9 @@ import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { toJson } from "../json.ts";
 import type { CallSource, ChildSource } from "../host/source.ts";
+import type { CommittedPresentation, PreparedRequest } from "../host/prepared.ts";
+import type { ObservedHunks } from "../diff/observed-context.ts";
+import type { PresentationOptions } from "../diff/compose.ts";
 import type { EffectiveDeclaration, FamilyProjection, Json, RequestView, ResultPart, ResultView, SuppliedToolResult } from "../presentation.ts";
 import type { DiffPresentation } from "../diff/model.ts";
 import { buildOperationPresentation } from "../operations.ts";
@@ -39,8 +42,10 @@ export interface RowServices {
   readonly initialSettings: () => Settings;
   readonly choices: (key: string, fallback: LocalChoices) => LocalChoices;
   readonly compile: (declaration: EffectiveDeclaration | undefined) => FamilyProjection;
-  readonly compare: (request: RequestView, result: ResultView | undefined) => DiffPresentation;
-  readonly renderDiff: (plan: DiffPresentation, width: number, settings: Settings, theme: Theme, captionedPath?: string, operationCard?: boolean, hideReportedHeading?: boolean) => string[];
+  readonly compare: (request: RequestView, result: ResultView | undefined, options?: PresentationOptions) => DiffPresentation;
+  readonly prepared?: (source: CallSource) => PreparedRequest;
+  readonly committed?: (source: CallSource) => CommittedPresentation | undefined;
+  readonly renderDiff: (plan: DiffPresentation, width: number, settings: Settings, theme: Theme, captionedPath?: string, operationCard?: boolean, hideReportedHeading?: boolean, observed?: ObservedHunks) => string[];
   readonly home: string;
   readonly now: () => number;
 }
@@ -62,6 +67,13 @@ export interface CompositionParts {
   withdraw(): void;
 }
 
+export interface ObservationMaterial {
+  readonly request: RequestView;
+  readonly result: SuppliedToolResult;
+  readonly plan: DiffPresentation;
+  readonly inline: readonly DiffPresentation[];
+}
+
 export const compositionParts = Symbol.for("pi-tool-views.composition.v1");
 
 type Part = "call" | "result" | "header" | "source" | "result-body" | "edge";
@@ -75,6 +87,8 @@ interface Facts {
   readonly resultView: ResultView | undefined;
   readonly plan: DiffPresentation;
   readonly operations: OperationPresentation;
+  readonly observed?: ObservedHunks;
+  readonly committed?: CommittedPresentation;
 }
 
 export class ToolViewRow {
@@ -100,6 +114,7 @@ export class ToolViewRow {
   private theme: Theme;
   private choices: LocalChoices;
   private readonly inlineDiffPlans = new WeakMap<Extract<ResultPart, { kind: "diff" }>, DiffPresentation>();
+  private observation: { readonly plan: DiffPresentation; readonly result: SuppliedToolResult; readonly observed: ObservedHunks } | undefined;
   private dirty = true;
   private facts: Facts | undefined;
   private fullArguments: { readonly args: Json; readonly text: string } | undefined;
@@ -137,6 +152,7 @@ export class ToolViewRow {
       result: new RowComponent(this, "result-body"), bottom: new RowComponent(this, "edge"),
       admitNested: snapshot => {
         if (this.retired) return false;
+        this.observation = undefined;
         if (this.nestedIdentity !== undefined && this.nestedIdentity !== snapshot.identity) {
           this.parts.withdraw();
           return false;
@@ -154,6 +170,7 @@ export class ToolViewRow {
         return true;
       },
       withdraw: () => {
+        this.observation = undefined;
         this.nested = undefined;
         this.childSource = undefined;
         this.withdrawn = true;
@@ -199,6 +216,7 @@ export class ToolViewRow {
 
   bind(source: CallSource | undefined): boolean {
     if (this.source === source) return false;
+    this.observation = undefined;
     this.source = source;
     this.sourceKey = source?.key;
     if (source?.result && this.endedAt === undefined) this.endedAt = this.services.now();
@@ -215,6 +233,7 @@ export class ToolViewRow {
   demoteChild(): boolean {
     const child = this.childSource;
     if (!child || (child.arguments === undefined && child.declaration === undefined)) return false;
+    this.observation = undefined;
     this.childSource = { ...child, arguments: undefined, declaration: undefined };
     this.markDirty();
     return true;
@@ -222,6 +241,7 @@ export class ToolViewRow {
 
   quarantineChild(): void {
     if (!this.childSource) return;
+    this.observation = undefined;
     this.childQuarantined = true;
     this.rawResult = undefined;
     this.markDirty();
@@ -236,6 +256,7 @@ export class ToolViewRow {
 
   bindChild(source: ChildSource | undefined): boolean {
     if (this.childSource === source) return false;
+    this.observation = undefined;
     if (this.childIdentity !== undefined && source?.key !== this.childIdentity) {
       this.childSource = undefined;
       this.sourceKey = undefined;
@@ -262,6 +283,7 @@ export class ToolViewRow {
   }
   invalidate(): void { if (!this.retired) this.context.invalidate(); }
   retire(): void {
+    this.observation = undefined;
     this.retired = true;
     this.source = undefined;
     this.childSource = undefined;
@@ -366,7 +388,7 @@ export class ToolViewRow {
         if (this.diffCache?.facts !== facts || this.diffCache.width !== width || this.diffCache.key !== key || this.diffCache.theme !== theme) {
           this.diffCache = { facts, width, key, theme, ...(facts.operations.items.length
             ? this.operationLines(facts, width, settings, this.choices.resultFull)
-            : { lines: this.services.renderDiff(facts.plan, width, settings, theme, title.target), resultRows: 0, omitted: 0 }) };
+            : { lines: this.services.renderDiff(facts.plan, width, settings, theme, title.target, false, false, facts.observed), resultRows: 0, omitted: 0 }) };
         }
         output.lines.push(...this.diffCache.lines);
         if (this.diffCache.omitted) button("Show full results", () => this.toggle("resultFull"));
@@ -436,7 +458,7 @@ export class ToolViewRow {
         : ["Arguments are unavailable."];
     } else if (view === "result") {
       const result = facts.result;
-      lines = result ? this.partLines({ kind: "original-content" }, result, width, settings).map(isolateStyles) : [];
+      lines = result ? this.partLines({ kind: "original-content" }, result, width, settings, facts).map(isolateStyles) : [];
       if (result) {
         const imageData = new Set(result.content.flatMap(content => content.kind === "image" && content.data ? [content.data] : []));
         for (const [label, value] of [["Details", result.details], ["Structured content", result.structuredContent]] as const) {
@@ -450,12 +472,12 @@ export class ToolViewRow {
       if (!lines.length) lines = [facts.result ? "No text was supplied in this result." : "No result has been supplied."];
     } else if (facts.operations.items.length) {
       const operations = this.operationLines(facts, width, settings, true).lines;
-      const remainder = [...this.services.renderDiff(facts.operations.collapsedReported ?? facts.operations.remainder, width, settings, this.theme, undefined, false, true),
-        ...facts.operations.remainder.context.flatMap(part => part.kind === "diff" && facts.result ? this.partLines(part, facts.result, width, settings) : [])];
+      const remainder = [...this.services.renderDiff(facts.operations.collapsedReported ?? facts.operations.remainder, width, settings, this.theme, undefined, false, true, facts.observed),
+        ...facts.operations.remainder.context.flatMap(part => part.kind === "diff" && facts.result ? this.partLines(part, facts.result, width, settings, facts) : [])];
       const separator = operations.length && stripTerminalSequences(operations.at(-1)!).trim() ? [""] : [];
       lines = remainder.length ? [...operations, ...separator, this.theme.fg("dim", "Result"), ...remainder] : operations;
     } else if (facts.plan.units.length) {
-      lines = this.services.renderDiff(facts.plan, width, settings, this.theme);
+      lines = this.services.renderDiff(facts.plan, width, settings, this.theme, undefined, false, false, facts.observed);
     } else {
       const request = facts.request;
       if (request.kind === "shell.launch" || request.kind === "program.javascript" || request.kind === "program.typescript") {
@@ -497,20 +519,61 @@ export class ToolViewRow {
     const source = this.source;
     const nested = this.nested;
     const admitted = !this.withdrawn && (nested ? nested.complete : this.childSource ? this.childSource.arguments !== undefined : source?.eligible === true);
-    const args = toJson(this.suppliedArguments());
+    const prepared = !this.withdrawn && !nested && !this.childSource && source ? this.services.prepared?.(source) : undefined;
+    const committed = !this.withdrawn && !nested && !this.childSource && source ? this.services.committed?.(source) : undefined;
+    const args = prepared?.args ?? toJson(this.suppliedArguments());
     if (args === undefined) this.fullArguments = undefined;
     const declaration = nested?.declaration ?? this.childSource?.declaration ?? source?.declaration;
-    const projection = this.services.compile(declaration);
-    const request: RequestView = admitted && args !== undefined ? projection.request(args) : { kind: "uninterpreted" };
+    const projection = prepared?.projection ?? this.services.compile(declaration);
+    const request: RequestView = admitted && args !== undefined ? prepared?.request ?? projection.request(args) : { kind: "uninterpreted" };
     const result = this.withdrawn ? undefined : nested ? nested.result : source?.result ?? this.rawResult;
-    const resultView = result ? projection.result(result, request) : undefined;
-    const plan = this.services.compare(request, resultView);
+    const resultView = committed?.resultView ?? (result ? projection.result(result, request) : undefined);
+    const plan = committed?.plan ?? this.services.compare(request, resultView, prepared?.changes ? { prepared: prepared.changes } : {});
     const complete = this.resultSettled(result);
-    this.facts = { args, request, result, resultView, plan, operations: buildOperationPresentation(request, plan, {}, complete) };
+    if (this.observation && (this.observation.plan !== plan || this.observation.result !== result)) this.observation = undefined;
+    this.facts = { args, request, result, resultView, plan, operations: buildOperationPresentation(request, plan, {}, complete),
+      ...(committed ? { committed } : {}), ...(this.observation ? { observed: this.observation.observed } : {}) };
     this.dirty = false;
     this.nativeCall = undefined;
     this.nativeResult = undefined;
     return this.facts;
+  }
+
+  observationMaterial(): ObservationMaterial | undefined {
+    if (this.retired || this.withdrawn || this.childQuarantined || (!this.source?.result && !this.childSource?.settled && !this.nested?.complete)) return undefined;
+    const facts = this.interpret();
+    if (!facts.result) return undefined;
+    const inline = facts.resultView?.parts.flatMap(part => part.kind === "diff" && part.placement === "inline" ? [this.inlinePlan(part, facts)] : []) ?? [];
+    return { request: facts.request, result: facts.result, plan: facts.plan, inline };
+  }
+
+  publishObservations(material: ObservationMaterial, observed: ObservedHunks): boolean {
+    const current = this.observationMaterial();
+    if (!current || current.plan !== material.plan || current.result !== material.result || !observed.size) return false;
+    this.observation = { plan: material.plan, result: material.result, observed };
+    this.facts = { ...this.facts!, observed };
+    this.invalidate();
+    return true;
+  }
+
+  clearObservations(expected: ObservedHunks): void {
+    if (this.observation?.observed !== expected) return;
+    this.observation = undefined;
+    if (this.facts) {
+      const { observed: _observed, ...facts } = this.facts;
+      this.facts = facts;
+    }
+    this.invalidate();
+  }
+
+  private inlinePlan(part: Extract<ResultPart, { kind: "diff" }>, facts: Facts): DiffPresentation {
+    let plan = facts.committed?.inline.get(part) ?? this.inlineDiffPlans.get(part);
+    if (!plan) {
+      const { placement: _placement, ...detached } = part;
+      plan = this.services.compare({ kind: "uninterpreted" }, { parts: [detached] });
+      this.inlineDiffPlans.set(part, plan);
+    }
+    return plan;
   }
 
   private duration(): string {
@@ -537,7 +600,7 @@ export class ToolViewRow {
       const available = Math.max(1, width - visibleWidth(label) - visibleWidth(preview) - 1);
       const heading = truncateToWidth(label + (title.target ? ` ${compactTarget(title.target, available, this.services.home)}` : "") + preview, width);
       let body: readonly string[] = [];
-      if (operation.kind === "edit") body = this.services.renderDiff(operation.diff, width, settings, this.theme, operation.path, true);
+      if (operation.kind === "edit") body = this.services.renderDiff(operation.diff, width, settings, this.theme, operation.path, true, false, facts.observed);
       else if (operation.kind === "web" && operation.observation) {
         const observed = queryObservationLines(operation.observation, width, this.theme);
         resultRows += observed.length;
@@ -566,7 +629,7 @@ export class ToolViewRow {
     const resultDiff = (nativeMode || this.choices.resultFull) && facts.operations.collapsedReported
       ? facts.operations.collapsedReported : facts.operations.remainder;
     const lines = facts.operations.items.length
-      ? this.services.renderDiff(resultDiff, width, settings, this.theme, undefined, false, true) : [];
+      ? this.services.renderDiff(resultDiff, width, settings, this.theme, undefined, false, true, facts.observed) : [];
     for (let index = 0; index < parts.length; index++) {
       const part = parts[index]!;
       const previous = parts[index - 1];
@@ -585,7 +648,7 @@ export class ToolViewRow {
           last = next.text;
         }
         rendered = wrap(text, width);
-      } else rendered = this.partLines(part, result, width, settings);
+      } else rendered = this.partLines(part, result, width, settings, facts);
 
       if (previous === undefined && lines.length && rendered.length && stripTerminalSequences(lines.at(-1)!).trim()
         && stripTerminalSequences(rendered[0]!).trim()) lines.push("");
@@ -610,16 +673,11 @@ export class ToolViewRow {
     return lines;
   }
 
-  private partLines(part: ResultPart, result: SuppliedToolResult, width: number, settings: Settings): string[] {
+  private partLines(part: ResultPart, result: SuppliedToolResult, width: number, settings: Settings, facts: Facts): string[] {
     switch (part.kind) {
       case "diff": {
-        let plan = this.inlineDiffPlans.get(part);
-        if (!plan) {
-          const { placement: _placement, ...detached } = part;
-          plan = this.services.compare({ kind: "uninterpreted" }, { parts: [detached] });
-          this.inlineDiffPlans.set(part, plan);
-        }
-        return this.services.renderDiff(plan, width, settings, this.theme, undefined, false, true);
+        const plan = this.inlinePlan(part, facts);
+        return this.services.renderDiff(plan, width, settings, this.theme, undefined, false, true, facts.observed);
       }
       case "original-content": return (part.indexes ?? result.content.map((_, index) => index)).flatMap(index => {
         const content = result.content[index];

@@ -2,6 +2,7 @@ import type { DiffBlock, DiffCell, DiffHunk, DiffPresentation, DiffSection, Diff
 import type { ChangedLinePair, ChangedSpan } from "./model.ts";
 import { wrapColumnUnits, wrapSlicedColumns } from "./column-wrap.ts";
 import type { ColumnUnit, ColumnWrapper } from "./column-wrap.ts";
+import type { DisplayBlock, ObservedHunks } from "./observed-context.ts";
 
 export type DiffLayout = "unified" | "split" | "auto";
 export type DiffSide = "before" | "after";
@@ -25,6 +26,7 @@ export interface DiffLayoutOptions {
   readonly sliceVisible?: (text: string, startColumn: number, endColumn: number) => string;
   /** Wraps columns consistently with visibleWidth; omitted custom wrappers retain slicing behavior. */
   readonly wrapVisible?: ColumnWrapper;
+  readonly observed?: ObservedHunks;
 }
 
 export interface DiffPaint {
@@ -40,7 +42,7 @@ export interface DiffPaint {
 }
 
 interface VisibleBlock {
-  readonly block: DiffBlock;
+  readonly block: DisplayBlock;
   readonly index: number;
 }
 
@@ -108,23 +110,24 @@ function integerOption(value: number | undefined, fallback: number, minimum: num
   return value;
 }
 
-function contextWindow(hunk: DiffHunk, radius: number): VisibleBlock[] {
+function contextWindow(hunk: DiffHunk, radius: number, observed?: ObservedHunks): VisibleBlock[] {
+  const blocks = observed?.get(hunk)?.blocks ?? hunk.blocks;
   const keep = new Set<number>();
-  hunk.blocks.forEach((block, index) => {
+  blocks.forEach((block, index) => {
     if (block.kind !== "change" && block.kind !== "located-change") return;
     keep.add(index);
 
     for (const direction of [-1, 1]) {
       for (let distance = 1; distance <= radius; distance += 1) {
         const candidateIndex = index + direction * distance;
-        const candidate = hunk.blocks[candidateIndex];
-        if (candidate?.kind !== "context") break;
+        const candidate = blocks[candidateIndex];
+        if (candidate?.kind !== "context" && candidate?.kind !== "observed-context") break;
         keep.add(candidateIndex);
       }
     }
   });
 
-  return hunk.blocks.flatMap((block, index) =>
+  return blocks.flatMap((block, index) =>
     block.kind === "gap" || block.kind === "instruction" || keep.has(index) ? [{ block, index }] : [],
   );
 }
@@ -164,6 +167,9 @@ function cellFlows(visible: readonly VisibleBlock[], paint: DiffPaint | undefine
         afterContext.set(block, newCell);
         oldCells.push(oldCell);
         newCells.push(newCell);
+      } else if (block.kind === "observed-context") {
+        if (block.before) oldCells.push(block.before);
+        if (block.after) newCells.push(block.after);
       } else if (block.kind === "change") {
         for (const pair of block.pairs) {
           if (pair.before !== undefined) oldCells.push(pair.before);
@@ -223,16 +229,18 @@ function defaultWrapColumns(text: string, width: number): readonly string[] {
   return wrapColumnUnits(units(), width);
 }
 
-function gutterWidth(presentation: DiffPresentation, lineNumbers: boolean): number {
+function gutterWidth(presentation: DiffPresentation, lineNumbers: boolean, observed?: ObservedHunks): number {
   if (!lineNumbers) return 2;
   let digits = 1;
   for (const unit of presentation.units) {
     for (const section of unit.sections) {
       if (section.kind !== "hunks") continue;
       for (const hunk of section.hunks) {
-        for (const block of hunk.blocks) {
+        for (const block of observed?.get(hunk)?.blocks ?? hunk.blocks) {
           if (block.kind === "context") {
             digits = Math.max(digits, String(block.oldLine1 ?? "").length, String(block.newLine1 ?? "").length, (block.newLabel ?? "").length);
+          } else if (block.kind === "observed-context") {
+            digits = Math.max(digits, cellLabel(block.before).length, cellLabel(block.after).length);
           } else if (block.kind === "change") {
             for (const pair of block.pairs) {
               digits = Math.max(digits, cellLabel(pair.before).length, cellLabel(pair.after).length);
@@ -316,8 +324,9 @@ function renderUnifiedHunk(
   wrap: ColumnWrapper,
   wholeRow: boolean,
   paint: DiffPaint | undefined,
+  observed: ObservedHunks | undefined,
 ): string[] {
-  const visible = contextWindow(hunk, radius);
+  const visible = contextWindow(hunk, radius, observed);
   const flows = cellFlows(visible, paint);
   const rows: string[] = [];
 
@@ -335,6 +344,20 @@ function renderUnifiedHunk(
       const cell = storedContextCell(block, "after", flows);
       const draw = lineDraw(cell, "after", " ", false, block.newLine1, flows, paint);
       rows.push(...wrapDrawLine(draw, width, widths, measure, wrap, paint, block.oldLine1));
+      continue;
+    }
+
+    if (block.kind === "observed-context") {
+      if (block.before && block.after && block.before.text === block.after.text && block.before.lineEnding === block.after.lineEnding) {
+        const draw = lineDraw(block.after, "after", " ", false, block.after.line1, flows, paint);
+        rows.push(...wrapDrawLine(draw, width, widths, measure, wrap, paint, block.before.line1));
+      } else {
+        for (const side of ["before", "after"] as const) {
+          const cell = block[side];
+          if (!cell) continue;
+          rows.push(...wrapDrawLine(lineDraw(cell, side, " ", false, cell.line1, flows, paint), width, widths, measure, wrap, paint));
+        }
+      }
       continue;
     }
 
@@ -378,8 +401,9 @@ function renderSplitHunk(
   wrap: ColumnWrapper,
   wholeRow: boolean,
   paint: DiffPaint | undefined,
+  observed: ObservedHunks | undefined,
 ): string[] {
-  const visible = contextWindow(hunk, radius);
+  const visible = contextWindow(hunk, radius, observed);
   const flows = cellFlows(visible, paint);
   const separator = "│";
   const contentWidth = Math.max(0, Math.floor((width - measure(separator) - gutter * 2) / 2));
@@ -421,6 +445,10 @@ function renderSplitHunk(
       appendPair(storedContextCell(block, "before", flows), storedContextCell(block, "after", flows), false, block.oldLine1, block.newLine1);
       continue;
     }
+    if (block.kind === "observed-context") {
+      appendPair(block.before, block.after, false, block.before?.line1, block.after?.line1);
+      continue;
+    }
     if (block.kind === "located-change") {
       if (block.operation === "insert-before" || block.operation === "insert-after") {
         rows.push(...wrap(`Insert ${block.operation === "insert-before" ? "before" : "after"} ${block.locationLabel}`, width));
@@ -460,6 +488,7 @@ function renderSection(
   wholeRow: boolean,
   paint: DiffPaint | undefined,
   showHeadings: boolean,
+  observed: ObservedHunks | undefined,
 ): string[] {
   const rows: string[] = [];
   const header = headerText(section, unit);
@@ -474,8 +503,8 @@ function renderSection(
 
   for (const hunk of section.hunks) {
     rows.push(...(mode === "unified"
-      ? renderUnifiedHunk(hunk, radius, width, unifiedWidths, measure, wrap, wholeRow, paint)
-      : renderSplitHunk(hunk, radius, width, baseGutter, measure, wrap, wholeRow, paint)));
+      ? renderUnifiedHunk(hunk, radius, width, unifiedWidths, measure, wrap, wholeRow, paint, observed)
+      : renderSplitHunk(hunk, radius, width, baseGutter, measure, wrap, wholeRow, paint, observed)));
   }
   return rows;
 }
@@ -500,7 +529,7 @@ export function renderDiffPresentation(
   const slice = options.sliceVisible ?? defaultSliceVisible;
   const wrap: ColumnWrapper = options.wrapVisible ?? (options.visibleWidth || options.sliceVisible
     ? (text, columns) => wrapSlicedColumns(text, columns, measure, slice) : defaultWrapColumns);
-  const fullGutter = gutterWidth(presentation, options.lineNumbers !== false);
+  const fullGutter = gutterWidth(presentation, options.lineNumbers !== false, options.observed);
   const splitGutter = Math.min(fullGutter, Math.max(0, Math.floor((width - 5) / 2)));
   const gutter = requestedMode === "split" ? splitGutter : Math.min(fullGutter, Math.max(0, width - 1));
   const splitContent = Math.floor((width - measure("│") - gutter * 2) / 2);
@@ -514,7 +543,7 @@ export function renderDiffPresentation(
       ? "split"
       : splitContent >= minimum ? "split" : "unified";
 
-  const unifiedWidths = requestedMode !== "split" ? unifiedGutterWidths(presentation, width, radius, options.lineNumbers !== false) : { before: 0, after: 0 };
+  const unifiedWidths = requestedMode !== "split" ? unifiedGutterWidths(presentation, width, radius, options.lineNumbers !== false, options.observed) : { before: 0, after: 0 };
   const rows: string[] = [];
   for (const note of presentation.requestNotes ?? []) rows.push(...wrap(note, width));
 
@@ -526,7 +555,7 @@ export function renderDiffPresentation(
     let previousAnonymous = false;
     for (const section of unit.sections) {
       const sectionMode = requestedMode === "auto" && !hasPairedChange(section) ? "unified" : mode;
-      const rendered = renderSection(unit, section, width, sectionMode, radius, gutter, unifiedWidths, measure, wrap, options.wholeRowHighlight === true, paint, options.showHeadings !== false);
+      const rendered = renderSection(unit, section, width, sectionMode, radius, gutter, unifiedWidths, measure, wrap, options.wholeRowHighlight === true, paint, options.showHeadings !== false, options.observed);
       const anonymous = unit.scope.kind === "call" && section.target === undefined;
       if (rendered.length && previousAnonymous && anonymous) rows.push("");
       rows.push(...rendered);
@@ -538,17 +567,20 @@ export function renderDiffPresentation(
 
 interface UnifiedGutterWidths { readonly before: number; readonly after: number }
 
-function unifiedGutterWidths(presentation: DiffPresentation, width: number, radius: number, lineNumbers: boolean): UnifiedGutterWidths {
+function unifiedGutterWidths(presentation: DiffPresentation, width: number, radius: number, lineNumbers: boolean, observed?: ObservedHunks): UnifiedGutterWidths {
   const available = width - 6;
   if (!lineNumbers || available < 2) return { before: 0, after: 0 };
   let before = 1;
   let after = 1;
   for (const unit of presentation.units) for (const section of unit.sections) {
     if (section.kind !== "hunks") continue;
-    for (const hunk of section.hunks) for (const { block } of contextWindow(hunk, radius)) {
+    for (const hunk of section.hunks) for (const { block } of contextWindow(hunk, radius, observed)) {
       if (block.kind === "context") {
         before = Math.max(before, String(block.oldLine1 ?? "").length);
         after = Math.max(after, (block.newLabel ?? String(block.newLine1 ?? "")).length);
+      } else if (block.kind === "observed-context") {
+        before = Math.max(before, cellLabel(block.before).length);
+        after = Math.max(after, cellLabel(block.after).length);
       } else if (block.kind === "change") {
         for (const pair of block.pairs) {
           before = Math.max(before, cellLabel(pair.before).length);

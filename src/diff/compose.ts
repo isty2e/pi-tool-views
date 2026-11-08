@@ -9,6 +9,9 @@ import type { ParsedPatch } from "./formats.ts";
 import type { DiffOrigin, DiffPresentation, DiffScope, DiffSection, DiffViewUnit, ScopedApplicationReport } from "./model.ts";
 import { requestedChangeSource } from "./requested.ts";
 import type { RequestedChangeSource } from "./requested.ts";
+import type { PreparedRequestedChanges } from "./requested.ts";
+
+export interface PresentationOptions extends ComparisonOptions { readonly prepared?: PreparedRequestedChanges }
 
 interface BuiltSections {
   readonly sections: readonly DiffSection[];
@@ -369,10 +372,10 @@ function retainedContext(result: ResultView | undefined, consumedReports: Readon
 export function buildDiffPresentation(
   request: RequestView,
   result: ResultView | undefined,
-  options: ComparisonOptions = {},
+  options: PresentationOptions = {},
 ): DiffPresentation {
   const budget = createComparisonBudget(options);
-  const requested = requestedChangeSource(request, budget);
+  const requested = requestedChangeSource(request, budget, options.prepared);
   const candidates = [...requestCandidates(request, requested), ...resultCandidates(result)];
   const { reports, consumedParts } = collectApplicationReports(result);
   const units = chooseUnits(candidates, budget);
