@@ -19,6 +19,7 @@ import type {
 	WebRequest,
 } from "../presentation.ts";
 import { matchLocatedEdit } from "./located-edit.ts";
+import { normalizeFileContext } from "./file-context.ts";
 import {
 	arrayItem,
 	booleanAt,
@@ -368,10 +369,12 @@ function replacementEdit(
 
 ): RequestedReplacement {
 	const itemPath = propertyByKey(itemSchema, "path", "string") ? stringAt(item, "path") : undefined;
+	const fileContext = normalizeFileContext(itemSchema, item);
 	return {
 		path: itemPath !== undefined ? itemPath : rootPath ?? "",
 		oldText: stringAt(item, "oldText") ?? "",
 		newText: stringAt(item, "newText") ?? "",
+		...(fileContext ? { fileContext } : {}),
 	};
 }
 

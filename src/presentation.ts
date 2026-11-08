@@ -53,7 +53,16 @@ export type SourceRequest =
   | { readonly kind: "source.lines"; readonly path: string; readonly firstLine1?: number; readonly lineLimit?: number; readonly lineEncoding?: "number-hash" | "anchor" | "plain" }
   | { readonly kind: "source.symbol"; readonly path: string; readonly symbol: string; readonly kindFilter?: string }
   | { readonly kind: "source.enclosing"; readonly path: string; readonly line1: number; readonly maxLines?: number };
-export interface RequestedReplacement { readonly path: string; readonly oldText: string; readonly newText: string }
+export type FileContext =
+  | { readonly kind: "directory"; readonly path: string }
+  | { readonly kind: "local"; readonly directory?: string }
+  | { readonly kind: "external"; readonly reference: string }
+  | { readonly kind: "unresolved" };
+export type FileReference =
+  | { readonly kind: "local"; readonly absolutePath: string }
+  | { readonly kind: "external"; readonly reference: string }
+  | { readonly kind: "unresolved"; readonly path: string };
+export interface RequestedReplacement { readonly path: string; readonly oldText: string; readonly newText: string; readonly fileContext?: FileContext }
 interface RequestedLocation {
   readonly kind: "located";
   readonly path: string;
@@ -65,14 +74,14 @@ export type RequestedLocatedEdit = RequestedLocation & (
   | { readonly operation: "replace" | "insert-before" | "insert-after"; readonly newText: string; readonly newLines?: never }
   | { readonly operation: "replace" | "insert-before" | "insert-after"; readonly newLines: readonly string[]; readonly newText?: never }
 );
-export type RequestedEdit = RequestedReplacement | RequestedLocatedEdit
+export type RequestedEdit = (RequestedReplacement | RequestedLocatedEdit
   | { readonly kind: "match"; readonly path: string; readonly oldText: string; readonly newText: string; readonly all: boolean; readonly fuzzy: boolean;
       readonly range?: { readonly start: string; readonly end: string } }
   | { readonly kind: "symbol"; readonly path: string; readonly symbol: string; readonly newText: string }
   | { readonly kind: "transfer"; readonly path: string; readonly operation: "copy" | "move";
       readonly source: { readonly path?: string; readonly start: string; readonly end: string };
       readonly destination: { readonly path?: string; readonly anchor: string; readonly direction: "before" | "after" };
-      readonly contextPath?: string };
+      readonly contextPath?: string }) & { readonly fileContext?: FileContext };
 export interface AstConstraints {
   readonly nodeKind?: string;
   readonly insideKind?: string;
@@ -84,13 +93,13 @@ export type AstSelector =
   | { readonly kind: "pattern"; readonly pattern: string; readonly selector?: string }
   | { readonly kind: "rule"; readonly rule: string }
   | { readonly kind: "structural"; readonly constraints: AstConstraints; readonly pattern?: string };
-export type FileChangeRequest =
+export type FileChangeRequest = (
   | { readonly kind: "change.write"; readonly path: string; readonly content: string }
   | { readonly kind: "change.replacements"; readonly requestedEdits: readonly RequestedEdit[] }
   | { readonly kind: "change.patch"; readonly text: string; readonly format: "codex" | "unified" | "unconfirmed" }
   | { readonly kind: "change.structural"; readonly language: string; readonly pattern: string; readonly rewrite: string; readonly paths?: readonly string[]; readonly constraints: AstConstraints; readonly intent: ApplyIntent }
   | { readonly kind: "change.rename-symbol"; readonly target: PositionRequest; readonly newName: string; readonly intent: ApplyIntent }
-  | { readonly kind: "change.rename-file"; readonly path: string; readonly newPath: string; readonly intent: ApplyIntent };
+  | { readonly kind: "change.rename-file"; readonly path: string; readonly newPath: string; readonly intent: ApplyIntent }) & { readonly fileContext?: FileContext };
 export type RelativeWait = { readonly milliseconds: number };
 export type PollWait = RelativeWait | { readonly untilUtc: string };
 export type StdinRepresentation = { readonly encoding: "utf8" | "c-escaped-utf8" | "base64"; readonly text: string };

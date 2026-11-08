@@ -4,6 +4,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { renderDiffPresentation } from "../diff/index.ts";
 import type { ChangedSpan, DiffCell, DiffPresentation, DiffSide } from "../diff/index.ts";
 import type { ChangedLinePair } from "../diff/model.ts";
+import type { ObservedHunks } from "../diff/observed-context.ts";
 import type { Settings } from "../settings/model.ts";
 import { isolateStyles, safeText } from "./text.ts";
 import { coalescedEmphasis, pairedEmphasis } from "./emphasis.ts";
@@ -63,7 +64,7 @@ function emphasize(syntax: string, spans: readonly ChangedSpan[], open: string):
   return text + (active ? "\x1b[49m" : "");
 }
 
-export function renderToolDiff(plan: DiffPresentation, width: number, settings: Settings, theme: Theme, captionedPath?: string, operationCard = false, hideReportedHeading = false): string[] {
+export function renderToolDiff(plan: DiffPresentation, width: number, settings: Settings, theme: Theme, captionedPath?: string, operationCard = false, hideReportedHeading = false, observed?: ObservedHunks): string[] {
   const pairedSpans = new WeakMap<ChangedLinePair, ReturnType<typeof pairedEmphasis>>();
   let backgrounds: Readonly<Record<DiffSide, string>> | undefined;
   let subtleBackgrounds: Readonly<Record<DiffSide, string>> | undefined;
@@ -130,6 +131,7 @@ export function renderToolDiff(plan: DiffPresentation, width: number, settings: 
         hideReportedHeading: hideReportedHeading || omitReportedHeading || (sectionRendered && unit.origin === "reported"),
         wholeRowHighlight: settings.diffRowBackground, visibleWidth,
         wrapVisible: wrapPaintedColumns,
+        ...(observed ? { observed } : {}),
       };
       let rendered: string[];
       try {
