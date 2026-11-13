@@ -1,0 +1,70 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      npm_tag: ${{ steps.metadata.outputs.npm_tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate release metadata
+        id: metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+
+          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (event.repository.private !== false) {
+            throw new Error('Only releases from a public repository can publish to npm. See docs/releasing.md.');
+          }
+          if (manifest.private) {
+            throw new Error('Remove private: true from package.json when ready to publish. See docs/releasing.md.');
+          }
+          if (process.env.GITHUB_REF_NAME !== `v${manifest.version}`) {
+            throw new Error('The release tag must be v followed by the package.json version.');
+          }
+
+          const npmTag = event.release.prerelease ? 'next' : 'latest';
+          appendFileSync(process.env.GITHUB_OUTPUT, `npm_tag=${npmTag}\n`);
+          console.log(`Ready to publish ${manifest.name}@${manifest.version} with npm tag ${npmTag}.`);
+          NODE
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm pack --dry-run --ignore-scripts
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Publish package
+        env:
+          NPM_DIST_TAG: ${{ needs.check.outputs.npm_tag }}
+        run: npm publish --ignore-scripts --access public --tag "$NPM_DIST_TAG"

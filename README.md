@@ -206,3 +206,6 @@ files and save behavior.
   it leaves that rule out.
 - The PiG frontend has limited support: card mouse controls and Native renderers are
   unavailable. Use `/tool-views inspect` to read full data.
+
+For maintainers, [releasing](docs/releasing.md) covers GitHub-to-npm publishing
+setup, version tags and failure recovery.

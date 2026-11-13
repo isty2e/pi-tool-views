@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "description": "Tool-call and result presentation for Pi.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isty2e/pi-tool-views.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.18"
