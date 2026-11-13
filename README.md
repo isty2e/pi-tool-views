@@ -209,3 +209,7 @@ files and save behavior.
 
 For maintainers, [releasing](docs/releasing.md) covers GitHub-to-npm publishing
 setup, version tags and failure recovery.
+
+## License
+
+[MIT](LICENSE).
