@@ -5,7 +5,7 @@ to use separately; their execution, authentication and provider setup are unchan
 
 Support follows the tool's declared inputs and returned data, not its name or npm
 package. The families below describe the dedicated views. A tool can have a
-specialized title or input view while its result keeps the producer's original
+specialized title or input view while its result keeps the tool's original
 text, Markdown or JSON. Ambiguous or unrecognized data uses a general view rather
 than guessed fields.
 
@@ -15,12 +15,12 @@ than guessed fields.
 | --- | --- |
 | File and source reads | Text reads, line selections, anchored/hashline reads, symbol reads and enclosing source. Syntax colors, supplied line identifiers and known locations stay together. |
 | Search and listings | Text/regex search, multi-pattern literal search, AST search, ranked symbol results, file discovery and directory listings. Matches and context are distinct; path lists do not acquire invented line numbers. |
-| File changes | Writes, exact replacements, patches, located/anchored edits, symbol edits and structural rewrites. Requested text or templates stay distinct from reported changes. Available before/after text can form Unified/Split diffs; missing before-images are not read from disk. |
+| File changes | Writes, exact replacements, patches, located/anchored edits, symbol edits and structural rewrites. Requested text or templates stay distinct from reported changes. Available before/after text can form Unified/Split diffs; live calls can add [local file context](#live-file-context). |
 | Commands and sessions | Shell launches, process-session polling and input. Command source has its own disclosure; output has a bounded head, tail or head/tail preview. Returned status/error information is retained. |
 | JavaScript and TypeScript | Program source and its result preview, including Codemode-style calls. A program body is not mixed into the tool's returned output. |
 | Code insight | Outlines, nested document symbols, locations/navigation, hover, diagnostics and module/project reports. Supplied source and locations can be projected; other report text or fields remain available rather than being reinterpreted. |
 | Web | Search queries, multiple queries, browsing actions, URL fetches, stored-result slices and source checks. Independent requested actions can have sections inside one call; provider content is retained, not universally decoded or restyled. |
-| Images | Image-view and generation requests, including supplied prompts/settings and image content. Native image display stays with Pi. |
+| Images | Image-view and generation requests, including supplied prompts/settings and returned text/metadata. Pi handles native image display. |
 
 See the [README examples](../README.md#supported-tools) for each family in light
 and dark themes.
@@ -63,8 +63,9 @@ input/output formats fit the same families.
   format. Web responses, command output, diagnostics and other reports can retain
   their supplied text/Markdown/JSON, with previews and inspection.
 - A requested patch or rewrite is not proof it was applied. A reported file change
-  takes precedence for that file; missing edits, coordinates or before-images are
-  not reconstructed from the filesystem.
+  takes precedence for that file. [Live file context](#live-file-context) can supply
+  matching line numbers and surrounding rows, but does not establish which edits
+  succeeded or reconstruct missing edits or historical before-images.
 - A successful diagnostics invocation does not mean it found no errors. Tool
   execution status and the findings inside its result remain separate.
 - Continuation, truncation and partial-result notices do not make omitted data
@@ -73,7 +74,27 @@ input/output formats fit the same families.
   provided. Tools from those systems can still use an existing family when their
   data fits it, or the general argument/result view otherwise.
 - Package-specific authentication, optional backends and execution dependencies
-  remain the producer's responsibility. This list is about rendering, not a
+  remain each tool's responsibility. This list is about rendering, not a
   certification of their provider integrations or every published version.
+
+## Live file context
+
+For live file changes, Tool Views can match supplied diff hunks against local
+files observed before and after execution to fill missing line numbers and
+surrounding context. Matching does not change reported outcomes or prove that an
+edit was applied. A write with no supplied before-image does not become a diff
+through these reads.
+
+Paths use the invocation's working directory unless the tool declares another
+directory or execution environment. Explicit external or unresolved targets are
+not read locally; undisclosed remote execution is not detected. Preflight reads
+can happen before a later approval handler blocks the edit. Observations stay in
+memory, are not added to model context or session history, and are discarded for
+blocked calls.
+
+Ambiguous matches, known overlapping calls, unsupported files and capture limits
+keep the ordinary diff. Reopening old sessions does not read current files to
+reconstruct past context. The [`diffContext` setting](settings.md#diff-layouts-and-emphasis)
+controls how much available context is shown.
 
 See [settings](settings.md) for card controls, defaults and configuration.
