@@ -1,4 +1,4 @@
-# Pi Tool Views
+# pi-tool-views
 
 Readable tool output for Pi, with compact action titles, syntax-highlighted source
 previews, and unified or side-by-side diffs. Tool Views changes how tool calls and
@@ -18,34 +18,25 @@ results look, not how tools execute or what they return.
 
 ## Install
 
-Tool Views is not published yet. To use a local checkout, you need Node.js 22.18
-or newer and a Pi host compatible with the 1.4.0 extension APIs.
-
-From the checkout, install its runtime dependencies:
-
-```sh
-npm ci --omit=dev
-```
+Requires Node.js 22.18 or newer and a Pi host compatible with the 1.4.0 extension
+APIs.
 
 Live diff previews can read local target files before the editing tool's approval;
 see [file context and read limits](docs/tools.md#live-file-context).
 
-Try it for one standalone Pi session:
+Install from npm:
 
 ```sh
-pi --no-extensions -e ./src/index.ts
+pi install npm:pi-tool-views
 ```
 
-This skips other automatically loaded extensions for this run without changing
-Pi's saved package list. To register the checkout for later sessions instead:
+Or install from GitHub:
 
 ```sh
-pi install .
+pi install git:github.com/isty2e/pi-tool-views
 ```
 
-Pi saves this declaration in personal settings; add `-l` for the current project
-only. Local packages load directly from the checkout, so keep that directory and
-its dependencies available.
+Pi saves the package in personal settings; add `-l` for the current project only.
 
 ## Supported tools
 
@@ -198,8 +189,7 @@ files and save behavior.
 
 ## Compatibility
 
-- The Pi integration targets the 1.4.0 APIs; checkout dependencies require Node.js
-  22.18 or newer.
+- The Pi integration targets the 1.4.0 APIs and requires Node.js 22.18 or newer.
 - Not every tool result has a specialized view; other data keeps a general
   argument/result presentation.
 - Pi still handles images. If Tool Views cannot place a bottom rule after them,
